@@ -11,20 +11,24 @@ Schreck KC, Langat P, Bhave VM, Li T, Woodward E, Pratilas CA, Eberhart CG, Bi W
 - Clinical data parsing: `braf_mastersheet_compiler.R`
 
 
+
 **Figure 2**
 - Tumor mutational burden
 - Genomic characterization and oncoprint generation: `braf_oncoprint.R` and `MafFunctions_BRAF.R`
 
 
+
 **Figure 3**
-- RNAseq analysis: 'Figure3_RNAseq.Rmd' --> 'Figure3_logisticPCA_kmeans_clustering.Rmd' --> 'Figure3_heatmap.Rmd'
-- Correlation testing: 'GenomicAnalysis-Cleaned.R'
+- RNAseq analysis: `braf_RNAseq.Rmd` --> `braf_logisticPCA_kmeans_clustering.Rmd` --> `braf_heatmap.Rmd`
+- Correlation testing: 'braf_chisq_correlations.R'
 - Covariate testing: `braf_covariates_analysis.R`
 - Fusions circos: `braf_circos.R`
 
 
+
 **Figure 4**
 - Survival analysis: `braf_survival.R`
+
 
 
 **Figure 5**
