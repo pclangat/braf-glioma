@@ -8,7 +8,7 @@ Schreck KC, Langat P, Bhave VM, Li T, Woodward E, Pratilas CA, Eberhart CG, Bi W
 ## Summary of analyses by Figure
 **Figure 1**
 - Age cutpoint analysis: `braf_age_cutpoints.R`
-- Clinical data parsing: `braf_mastersheet_compiler.R`
+- Clinical data: `braf_mastersheet_compiler.R` --> `braf_clinical_composite.R`
 
 
 
