@@ -1,0 +1,106 @@
+
+```{r setup, include=FALSE} 
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+library(readxl)
+library(stringr)
+library(RColorBrewer)
+
+braf_col <- c(brewer.pal(6, "Spectral")[c(6,5,4,2,1)], "gray")
+names(braf_col) <- c("Class I", "Class II", "Class III", "Fusion", "Gain", "Other")
+
+# Plot 1
+BRAF_correlations <- read_excel("Correlation-Chisq-posthoc-removehypermutated_copy.xlsx")
+BRAF_correlations_class <- 
+  BRAF_correlations[BRAF_correlations$Category %in% c("Class I", "Class II", "Class III", "Fusion", "Gain", "Other"),] # Filter by BRAF class
+
+Class <- unique(BRAF_correlations_class$Category)
+Genes <- unique(BRAF_correlations_class$Gene)
+heatmap_matrix <- matrix( rep(NA, length(Class)*length(Genes)), nrow = length(Genes))
+rownames(heatmap_matrix) = Genes
+colnames(heatmap_matrix) = Class
+
+for (r in 1:nrow(heatmap_matrix)){
+  for (c in 1:ncol(heatmap_matrix)){
+    this_class <- colnames(heatmap_matrix)[c]
+    this_gene <- rownames(heatmap_matrix)[r]
+    this_residual <- BRAF_correlations_class$Residuals[
+      BRAF_correlations_class$Category == this_class & BRAF_correlations_class$Gene == this_gene]
+    this_pval <- BRAF_correlations_class$p_numeric[
+      BRAF_correlations_class$Category == this_class & BRAF_correlations_class$Gene == this_gene]
+    
+    if (this_pval < 0.05){
+      heatmap_matrix[r,c] <- this_residual
+    }
+    else{
+      heatmap_matrix[r,c] <- 0
+    }
+  }
+}
+heatmap_matrix <- heatmap_matrix[rowSums(heatmap_matrix) > 0,]
+heatmap_matrix <- heatmap_matrix[,c("Class I","Class II","Class III","Fusion","Gain","Other")]
+
+col_fun = colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("blue", "gray95", "red"))
+
+ha = HeatmapAnnotation(
+  foo = anno_block(gp = gpar(fill = c("#3288BD","#99D594","#E6F598","#FC8D59","#D53E4F","gray")), 
+                   labels = c("Class I","Class II", "Class III", "Fusion", "Gain", "Other")))
+split = rep(1:6, each = 1)
+
+setEPS()
+postscript("Genes_associated_with_BRAF_classes_VERTICAL.eps", width = 8, height = 12)
+Heatmap(heatmap_matrix, name = "Residuals (p < 0.05)", col = col_fun, 
+    column_title = NULL, top_annotation = ha, column_split = split, 
+    show_column_names=FALSE, show_row_dend=FALSE,
+    row_title = NULL,width = unit(12, "cm"), height = unit(18, "cm"), color_space = "RGB", 
+    column_order=c("Class I", "Class II", "Class III", "Fusion", "Gain", "Other"))
+dev.off()
+
+# Plot 2
+BRAF_correlations <- read_excel("Correlation-Chisq-posthoc-removehypermutated_copy.xlsx")
+BRAF_correlations_class <- 
+  BRAF_correlations[BRAF_correlations$Category %in% c("Class I", "Class II", "Class III", "Fusion", "Gain", "Other"),] 
+
+Class <- unique(BRAF_correlations_class$Category)
+Genes <- unique(BRAF_correlations_class$Gene)
+heatmap_matrix <- matrix( rep(NA, length(Class)*length(Genes)), nrow = length(Class))
+rownames(heatmap_matrix) = Class
+colnames(heatmap_matrix) = Genes
+
+for (r in 1:nrow(heatmap_matrix)){
+  for (c in 1:ncol(heatmap_matrix)){
+    this_class <- rownames(heatmap_matrix)[r]
+    this_gene <- colnames(heatmap_matrix)[c]
+    this_residual <- BRAF_correlations_class$Residuals[
+      BRAF_correlations_class$Category == this_class & BRAF_correlations_class$Gene == this_gene]
+    this_pval <- BRAF_correlations_class$p_numeric[
+      BRAF_correlations_class$Category == this_class & BRAF_correlations_class$Gene == this_gene]
+    
+    if (this_pval < 0.05){
+      heatmap_matrix[r,c] <- this_residual
+    }
+    else{
+      heatmap_matrix[r,c] <- 0
+    }
+  }
+}
+heatmap_matrix <- heatmap_matrix[,colSums(heatmap_matrix) > 0]
+heatmap_matrix <- heatmap_matrix[c("Class I","Class II","Class III","Fusion","Gain","Other"),]
+
+col_fun = colorRamp2(c(min(heatmap_matrix), 0, max(heatmap_matrix)), c("blue", "gray95", "red"))
+
+ha = HeatmapAnnotation(which = "row",
+  foo = anno_block(gp = gpar(fill = c("#3288BD","#99D594","#E6F598","#FC8D59","#D53E4F","gray")), 
+                   labels = c("Class I","Class II", "Class III", "Fusion", "Gain", "Other")))
+split = rep(1:6, each = 1)
+
+setEPS()
+postscript("Genes_associated_with_BRAF_classes_HORIZONTAL.eps", width = 12, height = 8)
+Heatmap(heatmap_matrix, name = "Residuals (p < 0.05)", col = col_fun, 
+    column_title = NULL, left_annotation = ha, row_split = split, 
+    show_column_names=TRUE, show_column_dend = FALSE, show_row_names = FALSE, column_names_side="top",column_names_rot=60,
+    row_title = NULL,width = unit(20, "cm"), height = unit(12, "cm"), color_space = "RGB", 
+    row_order=c("Class I", "Class II", "Class III", "Fusion", "Gain", "Other"))
+dev.off()
+```

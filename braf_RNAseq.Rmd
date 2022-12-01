@@ -1,0 +1,453 @@
+
+```{r setup, include=FALSE} 
+library(ggplot2) 
+library(readxl) 
+library(stringr) 
+library(RColorBrewer) 
+library(data.table) 
+library(EnhancedVolcano) 
+library(edgeR) 
+library(tximport)
+library(GenomicFeatures)
+library(stringr)
+library(limma)
+library(biomaRt)
+library(ggplot2)
+library(goseq)
+library(readxl)
+library(ensembldb)
+
+tcga_samples <- read.csv("tcga_braf_glioma_mastersheet_copy.csv") 
+tcga_samples$PATIENT_ID <- as.character(tcga_samples$PATIENT_ID) 
+
+tcga_gbm <- read.table(file = 'TCGA-GBM-samples.tsv', sep = '\t', header = TRUE) 
+tcga_lgg <- read.table(file = 'TCGA-LGG-samples.tsv', sep = '\t', header = TRUE) 
+colnames(tcga_gbm) == colnames(tcga_lgg) 
+tcga_key <- rbind(tcga_gbm,tcga_lgg) 
+
+tcga_key_subset <- tcga_key[tcga_key$Case.ID %in% tcga_samples$PATIENT_ID,] 
+tcga_samples_subset <- tcga_samples[tcga_samples$PATIENT_ID %in% tcga_key$Case.ID,] 
+
+tcga_key_subset <- tcga_key_subset[order(tcga_key_subset$Case.ID),] 
+tcga_samples_subset <- tcga_samples_subset[order(tcga_samples_subset$PATIENT_ID),] 
+tcga_samples_subset$PATIENT_ID == tcga_key_subset$Case.ID 
+
+files_list <- as.character(tcga_key_subset$File.Name) 
+sample_id <- as.character(tcga_key_subset$Case.ID) 
+group <- as.character(tcga_samples_subset$BRAF_Class) 
+
+group[group == "Hypermutated"] <- "Other"
+
+files_list <- files_list[-which(group == "Class III")]
+sample_id <- sample_id[-which(group == "Class III")]
+group <- group[-which(group == "Class III")]
+group <- factor(group)
+group <- relevel(group, ref="Other")
+
+all_file_paths <- list.files(pattern='*.htseq.counts.gz', full.names=TRUE,recursive=TRUE)
+all_file_paths_subset <- c()
+for (f in 1:length(files_list)){
+  this_file <- files_list[f]
+  all_file_paths_subset[f] <- all_file_paths[str_detect(all_file_paths,this_file)]
+}
+
+DGEcounts <- readDGE(all_file_paths_subset, columns=c(1,2), group=group) 
+MetaTags <- grep("^__", rownames(DGEcounts)) 
+DGEcounts <- DGEcounts[-MetaTags, ] 
+rownames(DGEcounts$counts) <- gsub("\\..*","",rownames(DGEcounts$counts)) 
+
+keep <- filterByExpr(DGEcounts)
+
+DGEcounts <- DGEcounts[keep,,keep.lib.sizes=FALSE] 
+DGEcounts <- calcNormFactors(DGEcounts) 
+
+logcpm <- data.frame(cpm(DGEcounts, log=TRUE)) 
+mart <- useMart("ENSEMBL_MART_ENSEMBL", 
+          host="https://grch37.ensembl.org",
+          path="/biomart/martservice", 
+          dataset = "hsapiens_gene_ensembl",
+          ensemblRedirect = FALSE)
+counts <- rownames(logcpm)
+
+counts_names <- getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = counts,
+                 mart = mart, useCache = FALSE) 
+counts_names <- data.frame(counts_names) 
+counts_names$external_gene_name <- make.unique(counts_names$external_gene_name,sep = "_") 
+
+for (g in 1:length(counts_names$ensembl_gene_id)){ 
+  gene_id <- counts_names$ensembl_gene_id[g]
+  rownames(logcpm)[rownames(logcpm) == gene_id] <- counts_names$external_gene_name[g]
+}
+
+design <- model.matrix(~group)
+design
+
+DGEcounts  <- estimateDisp(DGEcounts, design, robust = TRUE)
+fit <- glmQLFit(DGEcounts,design, robust = TRUE) 
+```
+
+```{r setup, include=FALSE}
+# Differential expression testing
+qlf <- glmQLFTest(fit, coef=2) 
+df <- data.frame(topTags(qlf,n=1000000,p.value=1))
+df_classI_vs_other <- df[order(df$PValue, decreasing = FALSE),] 
+
+qlf <- glmQLFTest(fit, coef=3) 
+df <- data.frame(topTags(qlf,n=1000000,p.value=1))
+df_gain_vs_other <- df[order(df$PValue, decreasing = FALSE),]
+
+qlf  <- glmQLFTest(fit, contrast=c(0,-1,1)) 
+df <- data.frame(topTags(qlf,n=1000000,p.value=1))
+df_gain_vs_classI <- df[order(df$PValue, decreasing = FALSE),]
+
+names_df_classI_vs_other <- data.frame(getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = rownames(df_classI_vs_other),
+                 mart = mart, useCache = FALSE)) 
+names_df_gain_vs_other <- data.frame(getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = rownames(df_gain_vs_other),
+                 mart = mart, useCache = FALSE)) 
+names_df_gain_vs_classI <- data.frame(getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = rownames(df_gain_vs_classI),
+                 mart = mart, useCache = FALSE)) 
+
+names_df_classI_vs_other$external_gene_name <- make.unique(names_df_classI_vs_other$external_gene_name,sep = "_") 
+names_df_gain_vs_other$external_gene_name <- make.unique(names_df_gain_vs_other$external_gene_name,sep = "_") 
+names_df_gain_vs_classI$external_gene_name <- make.unique(names_df_gain_vs_classI$external_gene_name,sep = "_") 
+
+for (g in 1:length(names_df_classI_vs_other$ensembl_gene_id)){
+  gene_id <- names_df_classI_vs_other$ensembl_gene_id[g]
+  rownames(df_classI_vs_other)[rownames(df_classI_vs_other) == gene_id] <- names_df_classI_vs_other$external_gene_name[g]
+} 
+for (g in 1:length(names_df_gain_vs_other$ensembl_gene_id)){
+  gene_id <- names_df_gain_vs_other$ensembl_gene_id[g]
+  rownames(df_gain_vs_other)[rownames(df_gain_vs_other) == gene_id] <- names_df_gain_vs_other$external_gene_name[g]
+} 
+for (g in 1:length(names_df_gain_vs_classI$ensembl_gene_id)){
+  gene_id <- names_df_gain_vs_classI$ensembl_gene_id[g]
+  rownames(df_gain_vs_classI)[rownames(df_gain_vs_classI) == gene_id] <- names_df_gain_vs_classI$external_gene_name[g]
+}
+
+write.csv(df_classI_vs_other, "classI_vs_other_3groups_DEGs.csv")
+write.csv(df_gain_vs_other, "gain_vs_other_3groups_DEGs.csv")
+write.csv(df_gain_vs_classI, "gain_vs_classI_3groups_DEGs.csv")
+```
+
+```{r setup, include=FALSE}
+# Group gains and class I vs. everything else 
+tcga_samples <- read.csv("tcga_braf_glioma_mastersheet_copy.csv") 
+tcga_samples$PATIENT_ID <- as.character(tcga_samples$PATIENT_ID) 
+
+tcga_gbm <- read.table(file = 'TCGA-GBM-samples.tsv', sep = '\t', header = TRUE) 
+tcga_lgg <- read.table(file = 'TCGA-LGG-samples.tsv', sep = '\t', header = TRUE) 
+colnames(tcga_gbm) == colnames(tcga_lgg)
+tcga_key <- rbind(tcga_gbm,tcga_lgg) 
+
+tcga_key_subset <- tcga_key[tcga_key$Case.ID %in% tcga_samples$PATIENT_ID,] 
+tcga_samples_subset <- tcga_samples[tcga_samples$PATIENT_ID %in% tcga_key$Case.ID,]
+
+tcga_key_subset <- tcga_key_subset[order(tcga_key_subset$Case.ID),]
+tcga_samples_subset <- tcga_samples_subset[order(tcga_samples_subset$PATIENT_ID),]
+tcga_samples_subset$PATIENT_ID == tcga_key_subset$Case.ID
+
+files_list <- as.character(tcga_key_subset$File.Name)
+sample_id <- as.character(tcga_key_subset$Case.ID) 
+group <- as.character(tcga_samples_subset$BRAF_Class) 
+
+group[group == "Hypermutated"] <- "Other" 
+
+files_list <- files_list[-which(group == "Class III")] 
+sample_id <- sample_id[-which(group == "Class III")] 
+group <- group[-which(group == "Class III")] 
+
+group_classI_vs_all <- group 
+group_classI_vs_all[group_classI_vs_all %in% c("Other","Gain")] <- "No Class I" 
+
+group_gains_vs_all <- group 
+group_gains_vs_all[group_gains_vs_all %in% c("Other","Class I")] <- "No Gain" 
+
+group_classI_vs_all <- factor(group_classI_vs_all) 
+group_gains_vs_all  <- factor(group_gains_vs_all) 
+
+group_classI_vs_all <- relevel(group_classI_vs_all, ref="No Class I") 
+group_gains_vs_all  <- relevel(group_gains_vs_all, ref="No Gain") 
+
+all_file_paths <- list.files(pattern='*.htseq.counts.gz', full.names=TRUE,recursive=TRUE)
+all_file_paths_subset <- c()
+for (f in 1:length(files_list)){
+  this_file <- files_list[f]
+  all_file_paths_subset[f] <- all_file_paths[str_detect(all_file_paths,this_file)]
+}
+```
+
+```{r setup, include=FALSE}
+# Class I vs. all 
+DGEcounts <- readDGE(all_file_paths_subset, columns=c(1,2), group=group_classI_vs_all)
+MetaTags <- grep("^__", rownames(DGEcounts))
+DGEcounts <- DGEcounts[-MetaTags, ]
+rownames(DGEcounts$counts) <- gsub("\\..*","",rownames(DGEcounts$counts)) 
+
+keep <- filterByExpr(DGEcounts)
+
+DGEcounts <- DGEcounts[keep,,keep.lib.sizes=FALSE]
+DGEcounts <- calcNormFactors(DGEcounts)
+
+logcpm <- data.frame(cpm(DGEcounts, log=TRUE))
+mart <- useMart("ENSEMBL_MART_ENSEMBL", 
+          host="https://grch37.ensembl.org",
+          path="/biomart/martservice", 
+          dataset = "hsapiens_gene_ensembl",
+          ensemblRedirect = FALSE)
+counts <- rownames(logcpm) 
+
+counts_names <- getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = counts,
+                 mart = mart, useCache = FALSE) 
+counts_names <- data.frame(counts_names) 
+counts_names$external_gene_name <- make.unique(counts_names$external_gene_name,sep = "_")
+
+for (g in 1:length(counts_names$ensembl_gene_id)){
+  gene_id <- counts_names$ensembl_gene_id[g]
+  rownames(logcpm)[rownames(logcpm) == gene_id] <- counts_names$external_gene_name[g]
+} 
+
+design <- model.matrix(~group_classI_vs_all) 
+design 
+
+DGEcounts  <- estimateDisp(DGEcounts, design, robust = TRUE) 
+fit <- glmQLFit(DGEcounts,design, robust = TRUE) 
+
+qlf <- glmQLFTest(fit, coef=2)
+df <- data.frame(topTags(qlf,n=1000000,p.value=1))
+df_classI_vs_other <- df[order(df$PValue, decreasing = FALSE),]
+
+names_df_classI_vs_other <- data.frame(getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = rownames(df_classI_vs_other),
+                 mart = mart, useCache = FALSE))
+
+names_df_classI_vs_other$external_gene_name <- make.unique(names_df_classI_vs_other$external_gene_name,sep = "_")
+
+for (g in 1:length(names_df_classI_vs_other$ensembl_gene_id)){
+  gene_id <- names_df_classI_vs_other$ensembl_gene_id[g]
+  rownames(df_classI_vs_other)[rownames(df_classI_vs_other) == gene_id] <- names_df_classI_vs_other$external_gene_name[g]
+}
+write.csv(df_classI_vs_other, "classI_vs_all_other_2groups_DEGs.csv")
+
+transcripts_upregulated <- 
+c("ZNF106",
+  "PROS1",
+  "LZTS1",
+  "KANK1",
+  "TRIB2",
+  "DUSP4",
+  "ETV4",
+  "ETV5",
+  "DUSP6",
+  "PHLDA1",
+  "SPRY2",
+  "ELF1",
+  "LGALS3",
+  "FXYD5",
+  "S100A6",
+  "SERPINB1",
+  "SLCO4A1",
+  "MAP2K3")
+df_classI_vs_other_UPREGULATED <- df_classI_vs_other[rownames(df_classI_vs_other) %in% transcripts_upregulated,] 
+write.csv(df_classI_vs_other_UPREGULATED, "Dry2010_signature_genes_classI_vs_others.csv")
+
+df_classI_vs_other_filt <- df_classI_vs_other[df_classI_vs_other$PValue < 0.05,]
+df_classI_vs_other_filt <- df_classI_vs_other_filt[!(str_detect(rownames(df_classI_vs_other_filt), "ENSG")),]
+df_classI_vs_other_filt <- df_classI_vs_other_filt[!(str_detect(rownames(df_classI_vs_other_filt), "\\.")),]
+df_classI_vs_other_filt <- df_classI_vs_other_filt[!(str_detect(rownames(df_classI_vs_other_filt), "LINC")),]
+df_classI_vs_other_filt <- df_classI_vs_other_filt[!(str_detect(rownames(df_classI_vs_other_filt), "-")),]
+df_classI_vs_other_filt$F <- NULL
+colnames(df_classI_vs_other_filt) <- c("log2FC","log2CPM","p-value","FDR")
+write.csv(df_classI_vs_other_filt, "classI_vs_all_other_2groups_DEGs_FILTERED.csv")
+
+selectLab_var <- c("IL31RA","HMGA2","EREG","SERPINE1","BMP5","TFPI2","EPHA2","ESR2","TNFRSF18",
+                   "EGFR","ETV4","LZTS1","DUSP4",
+                   "PROS1","SPRY2","DUSP6")
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "ENSG"))]
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "\\."))]
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "LINC"))]
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "-"))]
+
+cairo_ps("classI_vs_all_volcano.eps",width=8,height=8, fallback_resolution = 1200)
+EnhancedVolcano(df_classI_vs_other,
+                lab = rownames(df_classI_vs_other),
+                title = 'BRAF class I vs. other BRAF-altered samples',
+                x = 'logFC',
+                y = 'FDR',
+                selectLab = selectLab_var,
+                FCcutoff = 1,
+                pCutoff = 0.05,
+                pointSize = 1,
+                labSize = 2.75,
+                xlim = c(-9.5, 11),
+                ylim = c(0, 4),
+                drawConnectors = T,
+                colConnectors = "black",
+                colAlpha = 1/3,
+                subtitle = NULL,
+                caption = NULL,
+                legendLabels = c("Not significant", "Log2FC", "FDR", "Log2FC & FDR"))
+dev.off()
+
+classI_GOseq <- as.integer(p.adjust(qlf$table$PValue[qlf$table$logFC!=0], method = "BH") < 0.05)
+names(classI_GOseq)=row.names(qlf$table[qlf$table$logFC!=0,])
+table(classI_GOseq)
+classI_GOseq_enriched <- classI_GOseq 
+classI_GOseq_depleted <- classI_GOseq 
+classI_GOseq_enriched <- replace(classI_GOseq_enriched, qlf$table$logFC < 0, 0) 
+classI_GOseq_depleted <- replace(classI_GOseq_depleted, qlf$table$logFC > 0, 0) 
+table(classI_GOseq_enriched) 
+table(classI_GOseq_depleted) 
+
+enriched_genes <- names(classI_GOseq_enriched)[classI_GOseq_enriched == 1] 
+nonenriched_genes <- names(classI_GOseq_enriched)[classI_GOseq_enriched == 0] 
+depleted_genes <- names(classI_GOseq_depleted)[classI_GOseq_depleted == 1] 
+nondepleted_genes <- names(classI_GOseq_depleted)[classI_GOseq_depleted == 0] 
+write.table(enriched_genes, "enriched_classI.txt", row.names = F, col.names = F, quote=F) 
+write.table(nonenriched_genes, "nonenriched_classI.txt", row.names = F, col.names = F, quote=F) 
+write.table(depleted_genes, "depleted_classI.txt", row.names = F, col.names = F, quote=F) 
+write.table(nondepleted_genes, "nondepleted_classI.txt", row.names = F, col.names = F, quote=F)
+
+supportedOrganisms()[supportedOrganisms()$Genome=="hg19",] 
+pwf_enriched  <- nullp(classI_GOseq_enriched,"hg19","ensGene") 
+pwf_depleted  <- nullp(classI_GOseq_depleted,"hg19","ensGene") 
+
+GO.wall_enriched <- goseq(pwf_enriched,"hg19","ensGene",test.cats=c("GO:BP")) 
+GO.wall_depleted <- goseq(pwf_depleted,"hg19","ensGene",test.cats=c("GO:BP"))
+
+GO.wall_enriched$over_represented_pvalue <- p.adjust(GO.wall_enriched$over_represented_pvalue, method="BH") 
+GO.wall_depleted$over_represented_pvalue <- p.adjust(GO.wall_depleted$over_represented_pvalue, method="BH") 
+GO.wall_enriched <- GO.wall_enriched[GO.wall_enriched$over_represented_pvalue < 0.05,] 
+GO.wall_depleted <- GO.wall_depleted[GO.wall_depleted$over_represented_pvalue < 0.05,] 
+
+write.csv(GO.wall_enriched,"classI_GOseq_enriched_genes.csv") 
+write.csv(GO.wall_depleted,"classI_GOseq_depleted_genes.csv") 
+```
+
+```{r setup, include=FALSE}
+# Gains vs. all 
+DGEcounts <- readDGE(all_file_paths_subset, columns=c(1,2), group=group_gains_vs_all) 
+MetaTags <- grep("^__", rownames(DGEcounts)) 
+DGEcounts <- DGEcounts[-MetaTags, ] 
+rownames(DGEcounts$counts) <- gsub("\\..*","",rownames(DGEcounts$counts)) 
+
+keep <- filterByExpr(DGEcounts) 
+
+DGEcounts <- DGEcounts[keep,,keep.lib.sizes=FALSE] 
+DGEcounts <- calcNormFactors(DGEcounts) 
+
+logcpm <- data.frame(cpm(DGEcounts, log=TRUE))
+mart <- useMart("ENSEMBL_MART_ENSEMBL", 
+          host="https://grch37.ensembl.org",
+          path="/biomart/martservice", 
+          dataset = "hsapiens_gene_ensembl",
+          ensemblRedirect = FALSE) 
+counts <- rownames(logcpm)
+
+counts_names <- getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = counts,
+                 mart = mart, useCache = FALSE) 
+counts_names <- data.frame(counts_names) 
+counts_names$external_gene_name <- make.unique(counts_names$external_gene_name,sep = "_") 
+
+for (g in 1:length(counts_names$ensembl_gene_id)){
+  gene_id <- counts_names$ensembl_gene_id[g]
+  rownames(logcpm)[rownames(logcpm) == gene_id] <- counts_names$external_gene_name[g]
+}
+
+design <- model.matrix(~group_gains_vs_all) 
+design 
+
+DGEcounts  <- estimateDisp(DGEcounts, design, robust = TRUE) 
+fit <- glmQLFit(DGEcounts,design, robust = TRUE) 
+
+qlf <- glmQLFTest(fit, coef=2) 
+df <- data.frame(topTags(qlf,n=1000000,p.value=1)) 
+df_gain_vs_other <- df[order(df$PValue, decreasing = FALSE),] 
+
+names_df_gain_vs_other <- data.frame(getBM(attributes = c("chromosome_name","external_gene_name","ensembl_gene_id"),
+                 filters = "ensembl_gene_id", values = rownames(df_gain_vs_other),
+                 mart = mart, useCache = FALSE))
+
+names_df_gain_vs_other$external_gene_name <- make.unique(names_df_gain_vs_other$external_gene_name,sep = "_")
+
+for (g in 1:length(names_df_gain_vs_other$ensembl_gene_id)){
+  gene_id <- names_df_gain_vs_other$ensembl_gene_id[g]
+  rownames(df_gain_vs_other)[rownames(df_gain_vs_other) == gene_id] <- names_df_gain_vs_other$external_gene_name[g]
+}
+write.csv(df_gain_vs_other, "gain_vs_all_other_2groups_DEGs.csv")
+
+df_gain_vs_other_filt <- df_gain_vs_other[df_gain_vs_other$PValue < 0.05,]
+df_gain_vs_other_filt <- df_gain_vs_other_filt[!(str_detect(rownames(df_gain_vs_other_filt), "ENSG")),]
+df_gain_vs_other_filt <- df_gain_vs_other_filt[!(str_detect(rownames(df_gain_vs_other_filt), "\\.")),]
+df_gain_vs_other_filt <- df_gain_vs_other_filt[!(str_detect(rownames(df_gain_vs_other_filt), "LINC")),]
+df_gain_vs_other_filt <- df_gain_vs_other_filt[!(str_detect(rownames(df_gain_vs_other_filt), "-")),]
+df_gain_vs_other_filt$F <- NULL
+colnames(df_gain_vs_other_filt) <- c("log2FC","log2CPM","p-value","FDR")
+write.csv(df_gain_vs_other_filt, "gain_vs_all_other_2groups_DEGs_FILTERED.csv") 
+
+selectLab_var <- c("TSHR","VIPR2","TPTEP1","IRX2","SSTR5","GALNT13","H19","DKK1","TRPM8","IL13RA2","PDGFA")
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "ENSG"))]
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "\\."))]
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "LINC"))]
+selectLab_var <- selectLab_var[!(str_detect(selectLab_var, "-"))]
+
+cairo_ps("gain_vs_all_volcano.eps",width=7.25,height=7.25, fallback_resolution = 1200)
+EnhancedVolcano(df_gain_vs_other,
+                lab = rownames(df_gain_vs_other),
+                title = 'BRAF gains vs. other BRAF-altered samples',
+                x = 'logFC',
+                y = 'FDR',
+                selectLab = selectLab_var,
+                FCcutoff = 1,
+                pCutoff = 0.05,
+                pointSize = 1,
+                labSize = 2.75,
+                xlim = c(-7.5, 7.5),
+                ylim = c(0, 4),
+                drawConnectors = T,
+                colConnectors = "black",
+                colAlpha = 1/3,
+                subtitle = NULL,
+                caption = NULL,
+                legendLabels = c("Not significant", "Log2FC", "FDR", "Log2FC & FDR")) 
+dev.off()
+
+gain_GOseq <- as.integer(p.adjust(qlf$table$PValue[qlf$table$logFC!=0], method = "BH") < 0.05) 
+names(gain_GOseq)=row.names(qlf$table[qlf$table$logFC!=0,]) 
+table(gain_GOseq) 
+gain_GOseq_enriched <- gain_GOseq 
+gain_GOseq_depleted <- gain_GOseq 
+gain_GOseq_enriched <- replace(gain_GOseq_enriched, qlf$table$logFC < 0, 0) 
+gain_GOseq_depleted <- replace(gain_GOseq_depleted, qlf$table$logFC > 0, 0) 
+table(gain_GOseq_enriched) 
+table(gain_GOseq_depleted) 
+
+enriched_genes <- names(gain_GOseq_enriched)[gain_GOseq_enriched == 1] 
+nonenriched_genes <- names(gain_GOseq_enriched)[gain_GOseq_enriched == 0] 
+depleted_genes <- names(gain_GOseq_depleted)[gain_GOseq_depleted == 1] 
+nondepleted_genes <- names(gain_GOseq_depleted)[gain_GOseq_depleted == 0] 
+write.table(enriched_genes, "enriched_gains.txt", row.names = F, col.names = F, quote=F) 
+write.table(nonenriched_genes, "nonenriched_gains.txt", row.names = F, col.names = F, quote=F) 
+write.table(depleted_genes, "depleted_gains.txt", row.names = F, col.names = F, quote=F) 
+write.table(nondepleted_genes, "nondepleted_gains.txt", row.names = F, col.names = F, quote=F) 
+
+supportedOrganisms()[supportedOrganisms()$Genome=="hg19",] 
+pwf_enriched  <- nullp(gain_GOseq_enriched,"hg19","ensGene") 
+pwf_depleted  <- nullp(gain_GOseq_depleted,"hg19","ensGene") 
+
+GO.wall_enriched <- goseq(pwf_enriched,"hg19","ensGene",test.cats=c("GO:BP")) 
+GO.wall_depleted <- goseq(pwf_depleted,"hg19","ensGene",test.cats=c("GO:BP"))
+
+GO.wall_enriched$over_represented_pvalue <- p.adjust(GO.wall_enriched$over_represented_pvalue, method="BH") 
+GO.wall_depleted$over_represented_pvalue <- p.adjust(GO.wall_depleted$over_represented_pvalue, method="BH") 
+GO.wall_enriched <- GO.wall_enriched[GO.wall_enriched$over_represented_pvalue < 0.05,] 
+GO.wall_depleted <- GO.wall_depleted[GO.wall_depleted$over_represented_pvalue < 0.05,] 
+
+write.csv(GO.wall_enriched,"gain_GOseq_enriched_genes.csv") 
+write.csv(GO.wall_depleted,"gain_GOseq_depleted_genes.csv")
+```

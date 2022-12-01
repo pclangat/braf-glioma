@@ -1,0 +1,732 @@
+
+```{r setup, include=FALSE} 
+library(data.tree)
+library(ComplexHeatmap)
+library(stringr)
+library(ggrepel)
+library(RColorBrewer)
+library(fpc)
+library(rARPACK)
+library(scatterplot3d)
+library(plot3D)
+library(klaR)
+library(cba)
+library(logisticPCA)
+library(FactoMineR)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(dplyr)
+
+braf_col <- c(brewer.pal(6, "Spectral")[c(6,5,4,2,1)], "gray")
+names(braf_col) <- c("Class I","Class II","Class III","Fusion","Gain","Other")
+subtype_col <- c(brewer.pal(7, "Dark2"))
+age_col <- brewer.pal(12, "Paired")
+age_col <- c(age_col[10], age_col[9])
+```
+
+```{r setup, include=FALSE}
+IntersectGeneList <- readRDS("IntersectGeneList.RDS")
+JHH_samples <- read.table("JHH_alterations_braf_samples.txt", header = T, sep = "\t") 
+braf_samples <- read.table("alterations_braf_samples.txt", header = T, sep = "\t") 
+
+adult_samples <- read.csv("censored_braf_adult_glioma_mastersheet.2021-07-09.csv")
+peds_samples <- read.csv("censored_braf_peds_glioma_mastersheet.2021-07-09.csv") 
+CLINICAL_MASTER_BRAF <- rbind(adult_samples, peds_samples)
+
+JHH_samples <- JHH_samples[,c("SAMPLE_ACCESSION_NBR","BEST_EFF_GENE","variant_classification")] 
+braf_samples <- braf_samples[,c("SAMPLE_ACCESSION_NBR","BEST_EFF_GENE","variant_classification")] 
+
+hypermuts <- c(
+  "BL-14-A45755",
+  "BL-15-T48446",
+  "BL-16-A40851",
+  "GENIE-MSK-P-0003529-T01-IM5",
+  "GENIE-MSK-P-0017675-T01-IM5",
+  "GENIE-MSK-P-0023123-T01-IM6",
+  "TCGA-06-5416", 
+  "TCGA-19-5956",
+  "TCGA-DU-6392",
+  "BL-17-J18600") 
+
+all_alterations_braf <- rbind(JHH_samples,braf_samples)
+all_alterations_braf <- all_alterations_braf[!(all_alterations_braf$SAMPLE_ACCESSION_NBR %in% hypermuts),] 
+
+rownames_f <- unique(as.character(all_alterations_braf$SAMPLE_ACCESSION_NBR))
+colnames_f <-  unique(as.character(c(all_alterations_braf$BEST_EFF_GENE,IntersectGeneList))) 
+
+braf_df <- 
+  data.frame(matrix(0, nrow = length(rownames_f), 
+                                  ncol = length(colnames_f))) 
+rownames(braf_df) <- rownames_f
+colnames(braf_df) <- colnames_f
+
+for (g in 1:ncol(braf_df)){
+  this_gene <- colnames(braf_df)[g]
+  samples_1 <- as.character(all_alterations_braf$SAMPLE_ACCESSION_NBR[all_alterations_braf$BEST_EFF_GENE == this_gene])
+  braf_df[,g][rownames(braf_df) %in% samples_1] <- 1 
+}
+
+braf_df_trimmed <- braf_df[,colnames(braf_df) %in% IntersectGeneList]
+```
+
+```{r setup, include=FALSE}
+dud_columns <- as.numeric(which(apply(braf_df_trimmed, 2, var)==0))
+braf_df_trimmed <- braf_df_trimmed[-c(dud_columns)] 
+
+mtx_logpca <- braf_df_trimmed
+mtx_logpca <- mutate_all(mtx_logpca, function(x) as.numeric(as.character(x))) 
+
+Alteration <- c()
+sample <- c()
+Subtype <- c()
+Age <- c()
+for (r in 1:nrow(mtx_logpca)){
+  this_sample <- rownames(mtx_logpca)[r]
+  Alteration[r] <- as.character(CLINICAL_MASTER_BRAF$BRAF_Class[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR == this_sample])
+  sample[r] <- as.character(CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR == this_sample])
+  Subtype[r] <- as.character(CLINICAL_MASTER_BRAF$Subtype[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR == this_sample])
+  Age[r] <- as.character(CLINICAL_MASTER_BRAF$Age_Interval[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR == this_sample])
+}
+sample == rownames(braf_df_trimmed)
+Alteration <- factor(Alteration)
+Subtype <- factor(Subtype)
+Age[!(Age == "<18")] <- "Adult"
+Age[Age == "<18"] <- "Pediatric"
+Age <- factor(Age)
+
+pca <- prcomp(mtx_logpca, scale = FALSE)
+fviz_eig(pca,ncp=40)+theme(axis.text.x=element_text(angle=90,hjust=1))+ggtitle("Scree plot: PCs for BRAF data")
+
+setEPS()
+postscript("Elbow_BRAF_kmeans_no_hypermuts.eps",width = 6, height = 6) 
+fviz_nbclust(mtx_logpca, kmeans, method = "wss") +
+  geom_vline(xintercept = 2, linetype = 2) + 
+  labs(subtitle = "Elbow method (BRAF data)") 
+dev.off()
+
+setEPS()
+postscript("Silhouette_BRAF_kmeans_no_hypermuts.eps",width = 6, height = 6) 
+fviz_nbclust(mtx_logpca, 
+             kmeans, method = "silhouette") +
+  labs(subtitle = "Silhouette method (BRAF data)")
+dev.off()
+
+logpca_cv = cv.lpca(mtx_logpca, ks = 25, ms = 1:10, quiet = F)
+logpca_model = logisticPCA(mtx_logpca, k = 25, m = which.min(logpca_cv))
+
+pcas <- logpca_model[["PCs"]]
+set.seed(10)
+clusters_kmeans_PCs_2 <- kmeans(pcas, 2, iter.max = 100000, nstart = 1000)
+clusters_kmeans_PCs_3 <- kmeans(pcas, 3, iter.max = 100000, nstart = 1000)
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_2clusters_BYCLUSTER.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_2$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(colour = Cluster, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (cluster)") + scale_colour_manual(values = c("mediumpurple3", "darkorange3")) + scale_shape_manual(values=c(19,17))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_3clusters_BYCLUSTER.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_3$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(colour = Cluster, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (cluster)") + scale_colour_manual(values = c("mediumpurple3", "darkorange3", "darkolivegreen3")) + scale_shape_manual(values=c(19,17,15))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_2clusters_ALTERATIONS.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_2$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Alteration, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (alterations)") + scale_colour_manual(values = braf_col) + scale_shape_manual(values=c(19,17))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_3clusters_ALTERATIONS_FOR_PAPER.eps",width = 10, height = 10) 
+Cluster <- factor(clusters_kmeans_PCs_3$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Alteration, size=4)) + 
+  ggtitle("") + scale_colour_manual(values = braf_col) + scale_shape_manual(values=c(19,17,15))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + xlab("Logistic PC1") + ylab("Logistic PC2") + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_3clusters_ALTERATIONS.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_3$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Alteration, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (alterations)") + scale_colour_manual(values = braf_col) + scale_shape_manual(values=c(19,17,15))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) +
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_no_hypermuts_2clusters_SUBTYPES.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_2$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Subtype, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (subtypes)") + scale_colour_manual(values = subtype_col) + scale_shape_manual(values=c(19,17))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_no_hypermuts_3clusters_SUBTYPES.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_3$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Subtype, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (subtypes)") + scale_colour_manual(values = subtype_col) + scale_shape_manual(values=c(19,17,15))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_2clusters_AGE.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_2$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Age, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (age)") + scale_colour_manual(values = age_col) + scale_shape_manual(values=c(19,17))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+setEPS()
+postscript("BRAF_kmeans_nohypermuts_3clusters_AGE.eps",width = 15, height = 15) 
+Cluster <- factor(clusters_kmeans_PCs_3$cluster)
+plot(logpca_model, type = "scores") + geom_point(aes(shape = Cluster, colour = Age, size=2)) + 
+  ggtitle("Logistic PCA, BRAF-altered gliomas (age)") + scale_colour_manual(values = age_col) + scale_shape_manual(values=c(19,17,15))  + theme_classic() + theme(text = element_text(size = 22)) + scale_size(guide="none") + theme(plot.title = element_text(hjust = 0.5)) + 
+guides(colour = guide_legend(override.aes = list(size=4)), shape=guide_legend(override.aes = list(size=4)))
+dev.off()
+
+c1_BRAF_kmeans_2 <- names(clusters_kmeans_PCs_2$cluster)[clusters_kmeans_PCs_2$cluster == 1]
+c2_BRAF_kmeans_2 <- names(clusters_kmeans_PCs_2$cluster)[clusters_kmeans_PCs_2$cluster == 2]
+
+c1_BRAF_kmeans_3 <- names(clusters_kmeans_PCs_3$cluster)[clusters_kmeans_PCs_3$cluster == 1]
+c2_BRAF_kmeans_3 <- names(clusters_kmeans_PCs_3$cluster)[clusters_kmeans_PCs_3$cluster == 2]
+c3_BRAF_kmeans_3 <- names(clusters_kmeans_PCs_3$cluster)[clusters_kmeans_PCs_3$cluster == 3]
+```
+
+```{r setup, include=FALSE}
+CLINICAL_MASTER_BRAF$x1p_19q[is.na(CLINICAL_MASTER_BRAF$x1p_19q)] <- 0
+
+CLINICAL_MASTER_BRAF$Cohort <- factor(CLINICAL_MASTER_BRAF$Cohort)
+CLINICAL_MASTER_BRAF$Gender <- factor(CLINICAL_MASTER_BRAF$Gender)
+CLINICAL_MASTER_BRAF$Age_Interval <- factor(CLINICAL_MASTER_BRAF$Age_Interval)
+CLINICAL_MASTER_BRAF$Primary <- factor(CLINICAL_MASTER_BRAF$Primary)
+CLINICAL_MASTER_BRAF$BRAF_Inhibitor <- factor(CLINICAL_MASTER_BRAF$BRAF_Inhibitor)
+CLINICAL_MASTER_BRAF$MGMT <- factor(CLINICAL_MASTER_BRAF$MGMT)
+CLINICAL_MASTER_BRAF$IDH <- factor(CLINICAL_MASTER_BRAF$IDH)
+CLINICAL_MASTER_BRAF$H3K27M <- factor(CLINICAL_MASTER_BRAF$H3K27M)
+CLINICAL_MASTER_BRAF$WHO_Grade <- factor(CLINICAL_MASTER_BRAF$WHO_Grade)
+CLINICAL_MASTER_BRAF$Subtype <- factor(CLINICAL_MASTER_BRAF$Subtype)
+CLINICAL_MASTER_BRAF$EGFR_Gain <- factor(CLINICAL_MASTER_BRAF$EGFR_Gain)
+CLINICAL_MASTER_BRAF$TERTP_Mut <- factor(CLINICAL_MASTER_BRAF$TERTP_Mut)
+CLINICAL_MASTER_BRAF$x1p_19q <- factor(CLINICAL_MASTER_BRAF$x1p_19q)
+
+c1_kmeans_3 <- CLINICAL_MASTER_BRAF[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR %in% c1_BRAF_kmeans_3,] 
+c2_kmeans_3 <- CLINICAL_MASTER_BRAF[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR %in% c2_BRAF_kmeans_3,] 
+c3_kmeans_3 <- CLINICAL_MASTER_BRAF[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR %in% c3_BRAF_kmeans_3,] 
+
+c1_kmeans_2 <- CLINICAL_MASTER_BRAF[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR %in% c1_BRAF_kmeans_2,] 
+c2_kmeans_2 <- CLINICAL_MASTER_BRAF[CLINICAL_MASTER_BRAF$SAMPLE_ACCESSION_NBR %in% c2_BRAF_kmeans_2,] 
+
+write.csv(c1_kmeans_3,"BRAF_3clusters_cluster1_kmeans_clinical_no_hypermuts.csv") 
+write.csv(c2_kmeans_3,"BRAF_3clusters_cluster2_kmeans_clinical_no_hypermuts.csv") 
+write.csv(c3_kmeans_3,"BRAF_3clusters_cluster3_kmeans_clinical_no_hypermuts.csv") 
+
+write.csv(c1_kmeans_2, "BRAF_2clusters_cluster1_kmeans_clinical_no_hypermuts.csv")
+write.csv(c2_kmeans_2, "BRAF_2clusters_cluster2_kmeans_clinical_no_hypermuts.csv")
+
+braf_df_trimmed <- mutate_all(braf_df_trimmed, function(x) as.numeric(as.character(x))) 
+
+kmeans_1_3 <- braf_df_trimmed[rownames(braf_df_trimmed) %in% c1_BRAF_kmeans_3,] 
+kmeans_2_3 <- braf_df_trimmed[rownames(braf_df_trimmed) %in% c2_BRAF_kmeans_3,] 
+kmeans_3_3 <- braf_df_trimmed[rownames(braf_df_trimmed) %in% c3_BRAF_kmeans_3,] 
+
+kmeans_1_2 <- braf_df_trimmed[rownames(braf_df_trimmed) %in% c1_BRAF_kmeans_2,] 
+kmeans_2_2 <- braf_df_trimmed[rownames(braf_df_trimmed) %in% c2_BRAF_kmeans_2,]
+
+pct_alts_1_kmeans <- (colSums(kmeans_1_2)/nrow(kmeans_1_2))*100 
+pct_alts_2_kmeans <- (colSums(kmeans_2_2)/nrow(kmeans_2_2))*100 
+names(pct_alts_1_kmeans) == names(pct_alts_2_kmeans)
+kmeans_plot_df <- data.frame(cbind(pct_alts_1_kmeans,pct_alts_2_kmeans))
+kmeans_plot_df$labels <- rownames(kmeans_plot_df)
+diff <- abs(kmeans_plot_df$pct_alts_1_kmeans - kmeans_plot_df$pct_alts_2_kmeans)
+kmeans_plot_df$labels[diff < 20] <- "" 
+
+setEPS()
+postscript("Alterations_2clusters_kmeans_nohypermuts.eps",width = 8, height = 8) 
+ggplot(kmeans_plot_df, 
+       aes(x=pct_alts_2_kmeans, 
+           y=pct_alts_1_kmeans)) + geom_point(colour="darkgrey") +
+geom_text_repel(aes(label = labels),  size=3, show.legend = FALSE,
+                     box.padding = unit(0.45, "lines"), min.segment.length=0, max.overlaps = 50) + theme_bw() + 
+  ggtitle("BRAF-altered gliomas: alterations across clusters") +
+  xlab("% altered, Cluster 2") + ylab("% altered, Cluster 1")
+dev.off() 
+colnames(kmeans_plot_df) <- c("% altered, Cluster 1",
+                           "% altered, Cluster 2", 
+                           "Average difference in altered % between clusters")
+kmeans_plot_df <- kmeans_plot_df[, !((colnames(kmeans_plot_df) %in% "Average difference in altered % between clusters"))]
+kmeans_plot_df <- kmeans_plot_df[order(kmeans_plot_df$`% altered, Cluster 2`, decreasing = T),]
+kmeans_plot_df <- signif(kmeans_plot_df, digits = 3)
+write.csv(kmeans_plot_df, "kmeans_no_hypermuts_2clusters_mutations_each_cluster.csv")
+
+pct_alts_kmeans_1 <- (colSums(kmeans_1_3)/nrow(kmeans_1_3)) *100
+pct_alts_kmeans_2 <- (colSums(kmeans_2_3)/nrow(kmeans_2_3)) *100
+pct_alts_kmeans_3 <- (colSums(kmeans_3_3)/nrow(kmeans_3_3)) *100
+plot_kmeans <- data.frame(cbind(pct_alts_kmeans_1, pct_alts_kmeans_2, pct_alts_kmeans_3))
+mean_pct_diff <- c()
+for (r in 1:nrow(plot_kmeans)){
+  pct12 <- abs(plot_kmeans[r,1] - plot_kmeans[r,2])
+  pct23 <- abs(plot_kmeans[r,2] - plot_kmeans[r,3])
+  pct13 <- abs(plot_kmeans[r,1] - plot_kmeans[r,3])
+  mean_pct_diff[r] <- (sum(pct12, pct23, pct13))/3
+}
+plot_kmeans <- cbind(plot_kmeans, mean_pct_diff)
+plot_kmeans <- plot_kmeans[order(plot_kmeans$mean_pct_diff, decreasing = T),]
+plot_kmeans$mean_pct_diff[plot_kmeans$mean_pct_diff < 40] <- 0
+plot_kmeans$mean_pct_diff[plot_kmeans$mean_pct_diff > 40] <- rownames(plot_kmeans)[plot_kmeans$mean_pct_diff > 40]
+plot_kmeans$mean_pct_diff[plot_kmeans$mean_pct_diff == "0"] <- ""
+
+setEPS()
+postscript("Alterations_3clusters_kmeans_nohypermuts.eps",width = 8, height = 8) 
+scatter3D(x=plot_kmeans[,1], y=plot_kmeans[,2], z=plot_kmeans[,3], bty = "b2", colvar = NULL, col = "darkgrey",
+          pch = 19, cex = 0.8, main = "BRAF-altered gliomas: alterations across clusters", 
+          xlab = "% altered, Clust. 1",
+          ylab ="% altered, Clust. 2", 
+          zlab = "% altered, Clust. 3")
+text3D(x=plot_kmeans[,1], y=plot_kmeans[,2], z=plot_kmeans[,3],  labels = plot_kmeans$mean_pct_diff,
+        add = TRUE, colkey = FALSE, cex = 0.5)
+dev.off()
+colnames(plot_kmeans) <- c("% altered, Cluster 1",
+                           "% altered, Cluster 2", 
+                           "% altered, Cluster 3",
+                           "Average difference in altered % between clusters")
+plot_kmeans <- plot_kmeans[, !((colnames(plot_kmeans) %in% "Average difference in altered % between clusters"))]
+plot_kmeans <- signif(plot_kmeans, digits = 3)
+write.csv(plot_kmeans, "kmeans_no_hypermuts_3clusters_mutations_each_cluster.csv")
+
+plot_kmeans_sig <- plot_kmeans[plot_kmeans$`% altered, Cluster 1` > 3 | 
+                                 plot_kmeans$`% altered, Cluster 2` > 10 | 
+                                 plot_kmeans$`% altered, Cluster 3` > 30,]
+write.csv(plot_kmeans_sig, "3clusters_significant_genes.csv")
+```
+
+```{r setup, include=FALSE}
+CLINICAL_DATA <- data.frame()
+samples <-  c(length(c1_kmeans_3$SAMPLE_ACCESSION_NBR), length(c2_kmeans_3$SAMPLE_ACCESSION_NBR), length(c3_kmeans_3$SAMPLE_ACCESSION_NBR)) 
+
+c1 <- table(c1_kmeans_3$Cohort)
+c2 <- table(c2_kmeans_3$Cohort)
+c3 <- table(c3_kmeans_3$Cohort)
+fraction_DFCI <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_GENIE <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) )
+fraction_JHH <- c( c1[3]/sum(c1),c2[3]/sum(c2),c3[3]/sum(c3) )
+fraction_TCGA <- c( c1[4]/sum(c1),c2[4]/sum(c2),c3[4]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_DFCI,
+                       fraction_GENIE,
+                       fraction_JHH,
+                       fraction_TCGA)
+
+c1 <- table(c1_kmeans_3$Age_Interval)
+c2 <- table(c2_kmeans_3$Age_Interval)
+c3 <- table(c3_kmeans_3$Age_Interval)
+fraction_50plus <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_18_34 <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) )
+fraction_35_50 <- c( c1[3]/sum(c1),c2[3]/sum(c2),c3[3]/sum(c3) )
+fraction_less18 <- c( c1[4]/sum(c1),c2[4]/sum(c2),c3[4]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_50plus,
+                       fraction_18_34,
+                       fraction_35_50,
+                       fraction_less18)
+
+c1 <- table(c1_kmeans_3$Gender)
+c2 <- table(c2_kmeans_3$Gender)
+c3 <- table(c3_kmeans_3$Gender)
+fraction_female <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_male <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_female, 
+                       fraction_male)
+
+c1 <- table(c1_kmeans_3$Primary)
+c2 <- table(c2_kmeans_3$Primary)
+c3 <- table(c3_kmeans_3$Primary)
+fraction_secondary <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_primary <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_secondary, 
+                       fraction_primary)
+
+c1 <- table(c1_kmeans_3$WHO_Grade)
+c2 <- table(c2_kmeans_3$WHO_Grade)
+c3 <- table(c3_kmeans_3$WHO_Grade)
+fraction_grade1 <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_grade2 <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) )
+fraction_grade3 <- c( c1[3]/sum(c1),c2[3]/sum(c2),c3[3]/sum(c3) )
+fraction_grade4 <- c( c1[4]/sum(c1),c2[4]/sum(c2),c3[4]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_grade1, 
+                       fraction_grade2, 
+                       fraction_grade3, 
+                       fraction_grade4)
+
+c1 <- table(c1_kmeans_3$Subtype)
+c2 <- table(c2_kmeans_3$Subtype)
+c3 <- table(c3_kmeans_3$Subtype)
+fraction_Astro_IDHmut <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) ) 
+fraction_GBM <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) )
+fraction_HGG <- c( c1[3]/sum(c1),c2[3]/sum(c2),c3[3]/sum(c3) )
+fraction_LGG <- c( c1[4]/sum(c1),c2[4]/sum(c2),c3[4]/sum(c3) )
+fraction_Oligo <- c( c1[5]/sum(c1),c2[5]/sum(c2),c3[5]/sum(c3) )
+fraction_PA <- c( c1[6]/sum(c1),c2[6]/sum(c2),c3[6]/sum(c3) )
+fraction_PXA <- c( c1[7]/sum(c1),c2[7]/sum(c2),c3[7]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_Astro_IDHmut, 
+                       fraction_GBM, 
+                       fraction_HGG, 
+                       fraction_LGG, 
+                       fraction_Oligo,
+                       fraction_PA,
+                       fraction_PXA)
+
+c1 <- table(c1_kmeans_3$x1p_19q)
+c2 <- table(c2_kmeans_3$x1p_19q)
+c3 <- table(c3_kmeans_3$x1p_19q)
+fraction_no_1p19q <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_1p19q <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_1p19q,
+                       fraction_1p19q)
+
+c1 <- table(c1_kmeans_3$BRAF_Inhibitor)
+c2 <- table(c2_kmeans_3$BRAF_Inhibitor)
+c3 <- table(c3_kmeans_3$BRAF_Inhibitor)
+fraction_BRAF_no_inhibitor <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_BRAF_inhibitor  <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_BRAF_no_inhibitor,
+                       fraction_BRAF_inhibitor)
+
+c1 <- table(c1_kmeans_3$BRAF_Class)
+c2 <- table(c2_kmeans_3$BRAF_Class)
+c3 <- table(c3_kmeans_3$BRAF_Class)
+fraction_classI <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_classII <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) )
+fraction_classIII <- c( c1[3]/sum(c1),c2[3]/sum(c2),c3[3]/sum(c3) )
+fraction_fusion <- c( c1[4]/sum(c1),c2[4]/sum(c2),c3[4]/sum(c3) )
+fraction_gain <- c( c1[5]/sum(c1),c2[5]/sum(c2),c3[5]/sum(c3) )
+fraction_other <- c( c1[6]/sum(c1),c2[6]/sum(c2),c3[6]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_classI, 
+                       fraction_classII, 
+                       fraction_classIII, 
+                       fraction_fusion,
+                       fraction_gain,
+                       fraction_other)
+
+c1 <- table(c1_kmeans_3$EGFR_Gain)
+c2 <- table(c2_kmeans_3$EGFR_Gain)
+c3 <- table(c3_kmeans_3$EGFR_Gain)
+fraction_no_EGFR <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_EGFR  <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_EGFR,
+                       fraction_EGFR)
+
+c1 <- table(c1_kmeans_3$H3K27M)
+c2 <- table(c2_kmeans_3$H3K27M)
+c3 <- table(c3_kmeans_3$H3K27M)
+fraction_no_H3K27M <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_H3K27M  <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_H3K27M,
+                       fraction_H3K27M)
+
+c1 <- table(c1_kmeans_3$MGMT)
+c2 <- table(c2_kmeans_3$MGMT)
+c3 <- table(c3_kmeans_3$MGMT)
+fraction_no_MGMT <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_partialMGMT  <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) )
+fraction_MGMT  <- c( c1[3]/sum(c1),c2[3]/sum(c2),c3[3]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_MGMT,
+                       fraction_partialMGMT,
+                       fraction_MGMT)
+
+c1 <- table(c1_kmeans_3$IDH)
+c2 <- table(c2_kmeans_3$IDH)
+c3 <- table(c3_kmeans_3$IDH)
+fraction_no_IDH <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_IDH  <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_IDH,
+                       fraction_IDH)
+
+c1 <- table(c1_kmeans_3$TERTP_Mut)
+c2 <- table(c2_kmeans_3$TERTP_Mut)
+c3 <- table(c3_kmeans_3$TERTP_Mut)
+fraction_no_TERT <- c( c1[1]/sum(c1),c2[1]/sum(c2),c3[1]/sum(c3) )
+fraction_TERT  <- c( c1[2]/sum(c1),c2[2]/sum(c2),c3[2]/sum(c3) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_TERT,
+                       fraction_TERT)
+
+rownames(CLINICAL_DATA) <- c(
+                            "% (DFCI)", 
+                            "% (GENIE)", 
+                            "% (JHH)", 
+                            "% (TCGA)", 
+                            "% (50+ yo)", 
+                            "% (18-34 yo)", 
+                            "% (35-50 yo)", 
+                            "% (<18 yo)", 
+                            "% (Female)", 
+                            "% (Male)", 
+                            "% (Secondary)", 
+                            "% (Primary)", 
+                            "% (Grade1)", 
+                            "% (Grade2)", 
+                            "% (Grade3)", 
+                            "% (Grade4)",
+                            "% (Astro IDH-mut)", 
+                            "% (GBM)", 
+                            "% (HGG)", 
+                            "% (LGG)", 
+                            "% (Oligo)",
+                            "% (PA)", 
+                            "% (PXA)", 
+                            "% (no 1p19q loss)", 
+                            "% (1p19q loss)",
+                            "% (no BRAF inhibitor)", 
+                            "% (BRAF inhibitor)", 
+                            "% (BRAF classI)", 
+                            "% (BRAF classII)", 
+                            "% (BRAF classIII)", 
+                            "% (BRAF fusion)", 
+                            "% (BRAF gain)", 
+                            "% (BRAF other)",
+                            "% (no EGFR gain)", 
+                            "% (EGFR gain)", 
+                            "% (no H3K27M alteration)", 
+                            "% (H3K27M altered)", 
+                            "% (no MGMT)", 
+                            "% (partial MGMT methylation)", 
+                            "% (MGMT methylation)", 
+                            "% (no IDH mut)", 
+                            "% (IDH mut)", 
+                            "% (no TERT alteration)", 
+                            "% (TERT alteration)") 
+colnames(CLINICAL_DATA) <- c("Cluster 1", "Cluster 2", "Cluster 3")
+mean_pct_diff <- c()
+for (r in 1:nrow(CLINICAL_DATA)){
+  pct12 <- abs(CLINICAL_DATA[r,1] - CLINICAL_DATA[r,2])
+  pct23 <- abs(CLINICAL_DATA[r,2] - CLINICAL_DATA[r,3])
+  pct13 <- abs(CLINICAL_DATA[r,1] - CLINICAL_DATA[r,3])
+  mean_pct_diff[r] <- (sum(pct12, pct23, pct13))/3
+}
+CLINICAL_DATA <- CLINICAL_DATA[order(mean_pct_diff, decreasing = T),]
+CLINICAL_DATA <- signif(CLINICAL_DATA*100,3)
+write.csv(CLINICAL_DATA, "kmeans_3clusters_no_hypermuts_clinical_profile_each_cluster.csv")
+```
+
+```{r setup, include=FALSE}
+CLINICAL_DATA <- data.frame()
+samples <-  c(length(c1_kmeans_2$SAMPLE_ACCESSION_NBR), length(c2_kmeans_2$SAMPLE_ACCESSION_NBR))
+
+c1 <- table(c1_kmeans_2$Cohort)
+c2 <- table(c2_kmeans_2$Cohort)
+fraction_DFCI <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_GENIE <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+fraction_JHH <- c( c1[3]/sum(c1),c2[3]/sum(c2))
+fraction_TCGA <- c( c1[4]/sum(c1),c2[4]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_DFCI,
+                       fraction_GENIE,
+                       fraction_JHH,
+                       fraction_TCGA)
+
+c1 <- table(c1_kmeans_2$Age_Interval)
+c2 <- table(c2_kmeans_2$Age_Interval)
+fraction_50plus <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_18_34 <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+fraction_35_50 <- c( c1[3]/sum(c1),c2[3]/sum(c2))
+fraction_less18 <- c( c1[4]/sum(c1),c2[4]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_50plus,
+                       fraction_18_34,
+                       fraction_35_50,
+                       fraction_less18)
+
+c1 <- table(c1_kmeans_2$Gender)
+c2 <- table(c2_kmeans_2$Gender)
+fraction_female <- c( c1[1]/sum(c1),c2[1]/sum(c2) )
+fraction_male <- c( c1[2]/sum(c1),c2[2]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_female, 
+                       fraction_male)
+
+c1 <- table(c1_kmeans_2$Primary)
+c2 <- table(c2_kmeans_2$Primary)
+fraction_secondary <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_primary <- c( c1[2]/sum(c1),c2[2]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_secondary, 
+                       fraction_primary)
+
+c1 <- table(c1_kmeans_2$WHO_Grade)
+c2 <- table(c2_kmeans_2$WHO_Grade)
+fraction_grade1 <- c( c1[1]/sum(c1),c2[1]/sum(c2) )
+fraction_grade2 <- c( c1[2]/sum(c1),c2[2]/sum(c2) )
+fraction_grade3 <- c( c1[3]/sum(c1),c2[3]/sum(c2) )
+fraction_grade4 <- c( c1[4]/sum(c1),c2[4]/sum(c2) ) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_grade1, 
+                       fraction_grade2, 
+                       fraction_grade3, 
+                       fraction_grade4)
+
+c1 <- table(c1_kmeans_2$Subtype)
+c2 <- table(c2_kmeans_2$Subtype)
+fraction_Astro_IDHmut <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_GBM <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+fraction_HGG <- c( c1[3]/sum(c1),c2[3]/sum(c2))
+fraction_LGG <- c( c1[4]/sum(c1),c2[4]/sum(c2))
+fraction_Oligo <- c( c1[5]/sum(c1),c2[5]/sum(c2))
+fraction_PA <- c( c1[6]/sum(c1),c2[6]/sum(c2))
+fraction_PXA <- c( c1[7]/sum(c1),c2[7]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_Astro_IDHmut, 
+                       fraction_GBM, 
+                       fraction_HGG, 
+                       fraction_LGG, 
+                       fraction_Oligo,
+                       fraction_PA,
+                       fraction_PXA)
+
+c1 <- table(c1_kmeans_2$x1p_19q)
+c2 <- table(c2_kmeans_2$x1p_19q)
+fraction_no_1p19q <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_1p19q <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_1p19q,
+                       fraction_1p19q) 
+
+c1 <- table(c1_kmeans_2$BRAF_Inhibitor)
+c2 <- table(c2_kmeans_2$BRAF_Inhibitor)
+fraction_BRAF_no_inhibitor <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_BRAF_inhibitor  <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_BRAF_no_inhibitor,
+                       fraction_BRAF_inhibitor) 
+
+c1 <- table(c1_kmeans_2$BRAF_Class)
+c2 <- table(c2_kmeans_2$BRAF_Class)
+fraction_classI <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_classII <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+fraction_classIII <- c( c1[3]/sum(c1),c2[3]/sum(c2))
+fraction_fusion <- c( c1[4]/sum(c1),c2[4]/sum(c2))
+fraction_gain <- c( c1[5]/sum(c1),c2[5]/sum(c2))
+fraction_other <- c( c1[6]/sum(c1),c2[6]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_classI, 
+                       fraction_classII, 
+                       fraction_classIII, 
+                       fraction_fusion,
+                       fraction_gain,
+                       fraction_other)
+
+c1 <- table(c1_kmeans_2$EGFR_Gain)
+c2 <- table(c2_kmeans_2$EGFR_Gain)
+fraction_no_EGFR <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_EGFR  <- c( c1[2]/sum(c1),c2[2]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_EGFR,
+                       fraction_EGFR)
+
+c1 <- table(c1_kmeans_2$H3K27M)
+c2 <- table(c2_kmeans_2$H3K27M)
+fraction_no_H3K27M <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_H3K27M  <- c( c1[2]/sum(c1),c2[2]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_H3K27M,
+                       fraction_H3K27M)
+
+c1 <- table(c1_kmeans_2$MGMT)
+c2 <- table(c2_kmeans_2$MGMT)
+fraction_no_MGMT <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_partialMGMT  <- c( c1[2]/sum(c1),c2[2]/sum(c2))
+fraction_MGMT  <- c( c1[3]/sum(c1),c2[3]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_MGMT,
+                       fraction_partialMGMT,
+                       fraction_MGMT)
+
+c1 <- table(c1_kmeans_2$IDH)
+c2 <- table(c2_kmeans_2$IDH)
+fraction_no_IDH <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_IDH  <- c( c1[2]/sum(c1),c2[2]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_IDH,
+                       fraction_IDH)
+
+c1 <- table(c1_kmeans_2$TERTP_Mut)
+c2 <- table(c2_kmeans_2$TERTP_Mut)
+fraction_no_TERT <- c( c1[1]/sum(c1),c2[1]/sum(c2))
+fraction_TERT  <- c( c1[2]/sum(c1),c2[2]/sum(c2)) 
+CLINICAL_DATA <- rbind(CLINICAL_DATA,
+                       fraction_no_TERT,
+                       fraction_TERT)
+
+rownames(CLINICAL_DATA) <- c(
+                            "% (DFCI)", 
+                            "% (GENIE)", 
+                            "% (JHH)", 
+                            "% (TCGA)", 
+                            "% (50+ yo)", 
+                            "% (18-34 yo)", 
+                            "% (35-50 yo)", 
+                            "% (<18 yo)", 
+                            "% (Female)", 
+                            "% (Male)", 
+                            "% (Secondary)", 
+                            "% (Primary)", 
+                            "% (Grade1)", 
+                            "% (Grade2)", 
+                            "% (Grade3)", 
+                            "% (Grade4)",
+                            "% (Astro IDH-mut)", 
+                            "% (GBM)", 
+                            "% (HGG)", 
+                            "% (LGG)", 
+                            "% (Oligo)",
+                            "% (PA)", 
+                            "% (PXA)", 
+                            "% (no 1p19q loss)", 
+                            "% (1p19q loss)", 
+                            "% (no BRAF inhibitor)", 
+                            "% (BRAF inhibitor)", 
+                            "% (BRAF classI)", 
+                            "% (BRAF classII)", 
+                            "% (BRAF classIII)", 
+                            "% (BRAF fusion)", 
+                            "% (BRAF gain)", 
+                            "% (BRAF other)",
+                            "% (no EGFR gain)", 
+                            "% (EGFR gain)", 
+                            "% (no H3K27M alteration)", 
+                            "% (H3K27M altered)", 
+                            "% (no MGMT)", 
+                            "% (partial MGMT methylation)", 
+                            "% (MGMT methylation)", 
+                            "% (no IDH mut)", 
+                            "% (IDH mut)", 
+                            "% (no TERT alteration)", 
+                            "% (TERT alteration)") 
+colnames(CLINICAL_DATA) <- c("Cluster 1", "Cluster 2")
+mean_pct_diff <- c()
+for (r in 1:nrow(CLINICAL_DATA)){
+  pct12 <- abs(CLINICAL_DATA[r,1] - CLINICAL_DATA[r,2])
+  mean_pct_diff[r] <- sum(pct12)
+}
+CLINICAL_DATA <- CLINICAL_DATA[order(mean_pct_diff, decreasing = T),]
+CLINICAL_DATA <- signif(CLINICAL_DATA*100,3)
+write.csv(CLINICAL_DATA, "kmeans_2clusters_no_hypermuts_clinical_profile_each_cluster.csv") 
+```
