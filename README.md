@@ -13,8 +13,7 @@ Schreck KC, Langat P, Bhave VM, Li T, Woodward E, Pratilas CA, Eberhart CG, Bi W
 
 
 **Figure 2**
-- Tumor mutational burden
-- Genomic characterization and oncoprint generation: `braf_oncoprint.R` and `MafFunctions_BRAF.R`
+- Genomic characterization, TMB calculation, and oncoprint generation: `braf_oncoprint.R` and `MafFunctions_BRAF.R`
 
 
 
