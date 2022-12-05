@@ -18,8 +18,8 @@ Schreck KC, Langat P, Bhave VM, Li T, Woodward E, Pratilas CA, Eberhart CG, Bi W
 
 
 **Figure 3**
-- RNAseq analysis: `braf_RNAseq.Rmd` --> `braf_logisticPCA_kmeans_clustering.Rmd` --> `braf_heatmap.Rmd`
-- Correlation testing: 'braf_chisq_correlations.R'
+- RNAseq analysis: `braf_RNAseq.Rmd` 
+- Correlation testing: `braf_logisticPCA_kmeans_clustering.Rmd` ; `braf_chisq_correlations.R` --> `braf_heatmap.Rmd`
 - Covariate testing: `braf_covariates_analysis.R`
 - Fusions circos: `braf_circos.R`
 
